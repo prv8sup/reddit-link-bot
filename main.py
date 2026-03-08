@@ -262,7 +262,7 @@ async def link(interaction: discord.Interaction):
 class LinkModal(discord.ui.Modal, title='Register Reddit Account'):
     reddit_username = discord.ui.TextInput(
         label='Your Reddit Username',
-        placeholder='e.g. AyoubBoutarfa (no u/ needed)',
+        placeholder='e.g. geek993 (no u/ needed)',
         required=True,
         max_length=20
     )
