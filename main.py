@@ -132,7 +132,6 @@ async def on_ready():
         print(e)
     bot.loop.create_task(task_checker_loop())
 create_task(task_checker_loop())
-
 # ============================================================
 # PAYMENT CHOICE BUTTONS
 # ============================================================
