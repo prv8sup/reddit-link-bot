@@ -12,6 +12,9 @@ import random
 from flask import Flask
 import threading
 import time
+import logging
+logging.basicConfig(level=logging.WARNING)
+
 
 # ============================================================
 # FLASK - Render port binding
@@ -120,11 +123,15 @@ async def check_comment_exists(comment_url):
 async def on_ready():
     print(f'{bot.user} online!')
     try:
-        synced = await bot.tree.sync()
+        # Only sync to your own server, way faster + no global rate limit
+        guild = discord.Object(id=YOUR_GUILD_ID)  # ← put your server ID here
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
         print(f'Synced {len(synced)} commands')
     except Exception as e:
         print(e)
     bot.loop.create_task(task_checker_loop())
+create_task(task_checker_loop())
 
 # ============================================================
 # PAYMENT CHOICE BUTTONS
@@ -555,6 +562,7 @@ async def task_checker_loop():
     while not bot.is_closed():
         now = datetime.utcnow()
         for task_id, t in list(tasks.items()):
+            await asyncio.sleep(0.5)  # ← ADD HERE
             if t['status'] != 'timer_running':
                 continue
             timer_end = datetime.fromisoformat(t['timer_end'])
