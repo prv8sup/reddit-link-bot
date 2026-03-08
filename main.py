@@ -124,7 +124,7 @@ async def on_ready():
     print(f'{bot.user} online!')
     try:
         # Only sync to your own server, way faster + no global rate limit
-        guild = discord.Object(id=YOUR_GUILD_ID)  # ← put your server ID here
+        guild = discord.Object(id=1480047341850329161)  # ← put your server ID here
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f'Synced {len(synced)} commands')
