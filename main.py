@@ -131,7 +131,6 @@ async def on_ready():
     except Exception as e:
         print(e)
     bot.loop.create_task(task_checker_loop())
-create_task(task_checker_loop())
 # ============================================================
 # PAYMENT CHOICE BUTTONS
 # ============================================================
