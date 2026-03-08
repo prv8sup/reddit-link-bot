@@ -309,6 +309,140 @@ async def task_cmd(interaction: discord.Interaction, reddit_username: str, amoun
         f'✅ **Reply with your Reddit comment link to start the 12h timer.**'
     )
     await interaction.response.send_message(f'✅ Task `#{task_id}` sent to u/{username}', ephemeral=True)
+# ============================================================
+# CLAIM BUTTON VIEW
+# ============================================================
+class ClaimView(discord.ui.View):
+    def __init__(self, task_id: str, amount: str, description: str, post_link: str):
+        super().__init__(timeout=None)
+        self.task_id = task_id
+        self.amount = amount
+        self.description = description
+        self.post_link = post_link
+
+    @discord.ui.button(label='✅ Claim Task', style=discord.ButtonStyle.success, custom_id='claim_task_btn')
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        member = interaction.user
+
+        # Must be verified
+        verified_role = discord.utils.get(guild.roles, name='Verified-Redditors')
+        if not verified_role or verified_role not in member.roles:
+            await interaction.followup.send('❌ You must be a verified worker to claim tasks. Use /link first.', ephemeral=True)
+            return
+
+        # Check if task already claimed
+        if tasks.get(f'pub_{self.task_id}', {}).get('claimed'):
+            await interaction.followup.send('❌ This task was already claimed!', ephemeral=True)
+            return
+
+        # Max 1 active task at a time
+        for t in tasks.values():
+            if t.get('claimer_id') == str(member.id) and t.get('status') in ('waiting_comment', 'timer_running'):
+                await interaction.followup.send('❌ You already have an active task. Finish it first!', ephemeral=True)
+                return
+
+        # Mark claimed immediately (race condition protection)
+        pub_key = f'pub_{self.task_id}'
+        if pub_key not in tasks:
+            tasks[pub_key] = {}
+        if tasks[pub_key].get('claimed'):
+            await interaction.followup.send('❌ This task was just claimed by someone else!', ephemeral=True)
+            return
+        tasks[pub_key]['claimed'] = True
+        tasks[pub_key]['claimer_id'] = str(member.id)
+        save_data(tasks, TASKS_FILE)
+
+        # Disable button
+        button.label = '🔒 Task Claimed'
+        button.disabled = True
+        button.style = discord.ButtonStyle.secondary
+        await interaction.message.edit(view=self)
+
+        # Get worker reddit username
+        user_data = links.get(str(member.id))
+        reddit_username = user_data['reddit'] if user_data else member.name
+
+        # Reuse existing private channel or create one
+        channel_name = f'private-{reddit_username}'
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if not channel:
+            category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+            if not category:
+                category = await guild.create_category(CATEGORY_NAME)
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            }
+            for r in guild.roles:
+                if r.permissions.administrator:
+                    overwrites[r] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+
+        # Create task entry (same format as /task so checker loop works)
+        task_id = self.task_id
+        tasks[task_id] = {
+            'reddit': reddit_username,
+            'amount': float(self.amount),
+            'details': self.description,
+            'status': 'waiting_comment',
+            'channel_id': channel.id,
+            'claimer_id': str(member.id),
+            'created': datetime.utcnow().isoformat()
+        }
+        save_data(tasks, TASKS_FILE)
+
+        await channel.send(
+            f'📋 **NEW TASK** `#{task_id}`\n'
+            f'━━━━━━━━━━━━━━━━━━━━\n'
+            f'{self.description}\n'
+            f'🔗 Post: {self.post_link}\n'
+            f'━━━━━━━━━━━━━━━━━━━━\n'
+            f'💵 Pay: **${self.amount}**\n\n'
+            f'✅ **Reply with your Reddit comment link to start the 12h timer.**'
+        )
+
+        await interaction.followup.send(f'✅ Task claimed! Go to {channel.mention}', ephemeral=True)
+
+        log_ch = discord.utils.get(guild.text_channels, name=LOG_CHANNEL)
+        if log_ch:
+            await log_ch.send(
+                f'📌 **Task Claimed** `#{task_id}`\n'
+                f'Worker: <@{member.id}> (u/{reddit_username})\n'
+                f'Pay: ${self.amount}\n'
+                f'Channel: {channel.mention}'
+            )
+
+# ============================================================
+# /publish (admin)
+# ============================================================
+@bot.tree.command(name='publish', description='Admin: Publish a task to jobs channel')
+@app_commands.describe(
+    description='What the worker needs to do',
+    amount='Pay amount e.g. 1.50',
+    post_link='The Reddit post link'
+)
+async def publish_cmd(interaction: discord.Interaction, description: str, amount: str, post_link: str):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message('👮 Admin only!', ephemeral=True)
+
+    jobs_channel = discord.utils.get(interaction.guild.text_channels, name='jobs-available')
+    if not jobs_channel:
+        return await interaction.response.send_message('❌ #jobs-available channel not found!', ephemeral=True)
+
+    task_id = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
+
+    embed = discord.Embed(title='🆕 New Task Available!', color=discord.Color.green(), timestamp=datetime.utcnow())
+    embed.add_field(name='📝 Task', value=description, inline=False)
+    embed.add_field(name='💰 Pay', value=f'${amount}', inline=True)
+    embed.add_field(name='🔗 Post', value=post_link, inline=True)
+    embed.add_field(name='⚡ How to Claim', value='Click below — first come first served!', inline=False)
+    embed.set_footer(text='Verified workers only • Max 1 active task at a time')
+
+    view = ClaimView(task_id=task_id, amount=amount, description=description, post_link=post_link)
+    await jobs_channel.send(content='@everyone 🚨 New task available!', embed=embed, view=view)
+    await interaction.response.send_message(f'✅ Task `#{task_id}` published!', ephemeral=True)
 
 # ============================================================
 # MESSAGE LISTENER
