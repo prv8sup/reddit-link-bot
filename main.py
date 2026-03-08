@@ -2,98 +2,159 @@ import discord
 from discord.ext import commands
 import json
 import os
+import re
+from datetime import datetime
+import random
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 DATA_FILE = 'links.json'
+CODES_FILE = 'codes.json'
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-def load_links():
+def load_data(file):
     try:
-        with open(DATA_FILE, 'r') as f:
-            return {int(k): v for k, v in json.load(f).items()}
+        with open(file, 'r') as f:
+            return json.load(f)
     except FileNotFoundError:
         return {}
 
-def save_links(links):
-    with open(DATA_FILE, 'w') as f:
-        json.dump({str(k): v for k, v in links.items()}, f)
+def save_data(data, file):
+    with open(file, 'w') as f:
+        json.dump(data, f, indent=2)
 
-links = load_links()
-
-class LinkModal(discord.ui.Modal, title='Enter Reddit Username'):
-    reddit_username = discord.ui.TextInput(
-        label='Username', placeholder='AyoubBoutarfa (no u/)',
-        style=discord.TextStyle.short, max_length=20
-    )
-
-    def __init__(self, ctx):
-        super().__init__()
-        self.ctx = ctx
-
-    async def on_submit(self, interaction: discord.Interaction):
-        reddit_un = self.reddit_username.value.strip().lower()
-        user_id = interaction.user.id
-
-        if user_id in links:
-            await interaction.response.send_message("❌ Already linked!", ephemeral=True)
-            return
-
-        links[user_id] = reddit_un
-        save_links(links)
-
-        guild = self.ctx.guild
-        role_name = f"Reddit-{reddit_un[:10]}"
-        role = discord.utils.get(guild.roles, name=role_name)  # ← FIXED: Added )
-        if not role:
-            role = await guild.create_role(name=role_name, color=0x00FF00, hoist=True)
-
-        await interaction.user.add_roles(role)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.get_member(guild.owner_id): discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
-            bot.user: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
-        category = await guild.create_category(f"🔒 Private: u/{reddit_un.title()}")
-        channel = await guild.create_text_channel(
-            f"{interaction.user.display_name}-tasks",
-            overwrites=overwrites,
-            category=category,
-            topic="Private 1:1 tasks"
-        )
-        await channel.send(f"**✅ Linked & Ready!**\n\n"
-                          f"**Discord:** {interaction.user.mention}\n"
-                          f"**Reddit:** `u/{reddit_un}`\n\n"
-                          f"Chat tasks here!")
-
-        await interaction.response.send_message("✅ Private task channel created!", ephemeral=True)
-
-@bot.slash_command(name='link', description='Create your private task channel')
-async def link(ctx: discord.ApplicationContext):
-    modal = LinkModal(ctx)
-    await ctx.interaction.response.send_modal(modal)
-
-@bot.slash_command(name='unlink', description='Remove your channel')
-async def unlink(ctx: discord.ApplicationContext):
-    user_id = ctx.user.id
-    if user_id in links:
-        del links[user_id]
-        save_links(links)
-        await ctx.respond("🔓 Unlinked.", ephemeral=True)
-    else:
-        await ctx.respond("Not linked.", ephemeral=True)
-
-@bot.slash_command(name='my_link', description='Your info')
-async def my_link(ctx: discord.ApplicationContext):
-    user_id = ctx.user.id
-    un = links.get(user_id, 'None')
-    await ctx.respond(f"**Reddit:** `u/{un}`" if un != 'None' else "No link.", ephemeral=True)
+links = load_data(DATA_FILE)
+codes = load_data(CODES_FILE)
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} ready! Links: {len(links)}')
+    print(f'{bot.user} online!')
+    try:
+        synced = await bot.tree.sync()
+        print(f'Synced {len(synced)} command(s)')
+    except Exception as e:
+        print(e)
+
+@bot.tree.command(name='link', description='Link your Reddit username')
+async def link(interaction: discord.Interaction):
+    modal = LinkModal()
+    await interaction.response.send_modal(modal)
+
+class LinkModal(discord.ui.Modal, title='Link Reddit Account'):
+    reddit_username = discord.ui.TextInput(
+        label='Reddit Username',
+        placeholder='e.g., AyoubBoutarfa',
+        required=True,
+        max_length=20
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        username = self.reddit_username.value.strip().lower()
+        if not re.match(r'^[a-z0-9_-]+$', username):
+            await interaction.response.send_message('❌ Invalid username. Letters/numbers/-/_ only.', ephemeral=True)
+            return
+
+        code = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
+        while code in codes:
+            code = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
+
+        codes[code] = {
+            'user_id': interaction.user.id, 
+            'username': username, 
+            'timestamp': datetime.now().isoformat()
+        }
+        save_data(codes, CODES_FILE)
+
+        await interaction.response.send_message(
+            f'✅ **Check Reddit DMs** for code `{code}`\\n'
+            f'Reply to bot with code → Admin verifies → Private channel created!',
+            ephemeral=True
+        )
+        print(f'Code {code} for u/{username}')
+
+from discord import app_commands
+
+@bot.tree.command(name='verify_reddit', description='🔐 Admin: Verify Reddit code')
+@app_commands.describe(code='6-char code from Reddit DM reply')
+async def verify_reddit(interaction: discord.Interaction, code: str):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message('👮 Admin only!', ephemeral=True)
+
+    if code in codes:
+        data = codes.pop(code)
+        user_id = data['user_id']
+        reddit_username = data['username']
+
+        links[str(user_id)] = reddit_username
+        save_data(links, DATA_FILE)
+
+        guild = interaction.guild
+        user = guild.get_member(user_id)
+        if not user:
+            return await interaction.response.send_message('❌ User not found', ephemeral=True)
+
+        # Unique role
+        role_name = f'Reddit_{reddit_username}'
+        role = discord.utils.get(guild.roles, name=role_name)
+        if not role:
+            role = await guild.create_role(name=role_name)
+
+        await user.add_roles(role)
+
+        # Private channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            role: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        channel = await guild.create_text_channel(
+            f'private-{reddit_username}',
+            overwrites=overwrites,
+            topic=f'🔒 Reddit: u/{reddit_username} | Discord: <@{user_id}>'
+        )
+
+        await channel.send(f'''
+✅ **Welcome to your private channel!** <@{user_id}>
+**Reddit:** u/{reddit_username}
+**For:** Task assignments & private chat
+        ''')
+
+        await interaction.response.send_message(f'✅ Verified u/{reddit_username} → Channel: #{channel.name}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Invalid/expired code', ephemeral=True)
+
+@bot.tree.command(name='unlink', description='🗑️ Remove your Reddit link')
+async def unlink(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id in links:
+        reddit_username = links.pop(user_id)
+        save_data(links, DATA_FILE)
+
+        # Cleanup
+        guild = interaction.guild
+        role_name = f'Reddit_{reddit_username}'
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            await role.delete()
+
+        channel_name = f'private-{reddit_username}'
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel:
+            await channel.delete()
+
+        await interaction.response.send_message('✅ Unlinked + cleaned up!', ephemeral=True)
+    else:
+        await interaction.response.send_message('ℹ️ Not linked.', ephemeral=True)
+
+@bot.tree.command(name='status', description='📊 Check your link status')
+async def status(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id in links:
+        username = links[user_id]
+        await interaction.response.send_message(f'✅ Linked: u/{username}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Not linked. Use /link', ephemeral=True)
 
 bot.run(DISCORD_TOKEN)
